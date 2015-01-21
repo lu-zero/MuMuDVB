@@ -1,28 +1,28 @@
-/* 
+/*
  * MuMuDVB - Stream a DVB transport stream.
  * Based on dvbstream by (C) Dave Chapman <dave@dchapman.com> 2001, 2002.
- * 
+ *
  * (C) 2004-2013 Brice DUBOST
- * 
+ *
  * Code for dealing with libdvben50221 inspired from zap_ca
  * Copyright (C) 2004, 2005 Manu Abraham <abraham.manu@gmail.com>
  * Copyright (C) 2006 Andrew de Quincey (adq_dvb@lidskialf.net)
- * 
+ *
  *
  * The latest version can be found at http://mumudvb.braice.net
- * 
+ *
  * Copyright notice:
- * 
+ *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
@@ -54,7 +54,7 @@
  * Generation of SAP announces
 
  *@section files
- * mumudvb.h header containing global information 
+ * mumudvb.h header containing global information
  *
  * autoconf.c autoconf.h code related to autoconfiguration
  *
@@ -142,7 +142,7 @@ extern char *program_invocation_short_name;
 
 static char *log_module="Main: ";
 
-/* Signal handling code shamelessly copied from VDR by Klaus Schmidinger 
+/* Signal handling code shamelessly copied from VDR by Klaus Schmidinger
    - see http://www.cadsoft.de/people/kls/vdr/index.htm */
 
 // global variables used by SignalHandler
@@ -310,6 +310,17 @@ main (int argc, char **argv)
 #endif
 	FILE *pidfile;
 	char *dump_filename = NULL;
+	char *dump_filename2 = NULL;
+	int dump_fileseq = 1;
+	char dump_fileseqstr[20];
+
+	size_t dump_filesize = 0;
+	size_t dump_nowsize = 0;
+	struct timeval dump_lastchunk;
+	struct timeval dump_now;
+	gettimeofday(&dump_lastchunk, NULL);
+	struct tm *dump_nowtm = gmtime(&dump_lastchunk.tv_sec);
+	int dump_chunkhours = 0;
 	FILE *dump_file;
 
 	// configuration file parsing
@@ -335,6 +346,8 @@ main (int argc, char **argv)
 			{"list-cards", no_argument, NULL, 'l'},
 			{"card", required_argument, NULL, 'a'},
 			{"dumpfile", required_argument, NULL, 'z'},
+			{"dumpsize", required_argument, NULL, 'n'},
+			{"dumptime", required_argument, NULL, 'p'},
 			{0, 0, 0, 0}
 	};
 	int c, option_index = 0;
@@ -393,15 +406,31 @@ main (int argc, char **argv)
 		case 'l':
 			listingcards=1;
 			break;
+                case 'n':
+                    dump_filesize = atol(optarg) * 1024 * 1024;
+                    break;
+                case 'p':
+                    dump_chunkhours = atoi(optarg);
+                    break;
 		case 'z':
-			dump_filename = (char *) malloc (strlen (optarg) + 1);
-			if (!dump_filename)
-			{
+                    dump_filename = strdup(optarg);
+                    dump_filename2 = (char *) malloc (strlen (optarg) + 21);
+                    if ( (!dump_filename) || (!dump_filename2) ) {
 				log_message( log_module, MSG_ERROR,"Problem with malloc : %s file : %s line %d\n",strerror(errno),__FILE__,__LINE__);
 				exit(ERROR_MEMORY);
 			}
-			strncpy (dump_filename, optarg, strlen (optarg) + 1);
-			log_message( log_module, MSG_WARN,"You've decided to dump the received stream into %s. Be warned, it can grow quite fast", dump_filename);
+                    strncpy (dump_filename2, dump_filename, strlen (optarg) + 1);
+                    sprintf(dump_fileseqstr, "-%04d%02d%02d-%02d%02d.ts",
+                            dump_nowtm->tm_year + 1900,
+                            dump_nowtm->tm_mon + 1,
+                            dump_nowtm->tm_mday,
+                            dump_nowtm->tm_hour,
+                            dump_nowtm->tm_min);
+                    strncat(dump_filename2, dump_fileseqstr,
+                            strlen(optarg) + 21);
+                    log_message(log_module, MSG_WARN,
+                                "You've decided to dump the received stream into %s and so on.",
+                                 dump_filename2);
 			break;
 		}
 	}
@@ -1465,19 +1494,19 @@ main (int argc, char **argv)
 	//We open the dump file if any
 	/******************************************************/
 	dump_file = NULL;
-	if(dump_filename)
+	if(dump_filename2)
 	{
-		dump_file = fopen (dump_filename, "w");
+		dump_file = fopen (dump_filename2, "w");
 		if (dump_file == NULL)
 		{
 			log_message( log_module,  MSG_ERROR, "%s: %s\n",
-					dump_filename, strerror (errno));
-			free(dump_filename);
+					dump_filename2, strerror (errno));
+			free(dump_filename2);
 		}
 	}
 #ifndef ANDROID
 	mlockall(MCL_CURRENT | MCL_FUTURE);
-#endif	
+#endif
 	/******************************************************/
 	//Main loop where we get the packets and send them
 	/******************************************************/
@@ -1571,10 +1600,39 @@ main (int argc, char **argv)
 			actual_ts_packet=card_buffer.reading_buffer+card_buffer.read_buff_pos;
 
 			//If the user asked to dump the streams it's here tath it should be done
-			if(dump_file)
-				if(fwrite(actual_ts_packet,sizeof(unsigned char),TS_PACKET_SIZE,dump_file)<TS_PACKET_SIZE)
-					log_message( log_module,MSG_WARN,"Error while writing the dump : %s", strerror(errno));
+			if (dump_file) {
+                            dump_nowsize += TS_PACKET_SIZE;
+                            gettimeofday(&dump_now, NULL);
+                            dump_nowtm = gmtime(&dump_now.tv_sec);
+                            if(((dump_filesize != 0) && ( dump_nowsize > dump_filesize )) ||
+                               ((dump_chunkhours != 0) && ((dump_lastchunk.tv_sec + 3600 * dump_chunkhours ) < dump_now.tv_sec)))
+                            {
+                                fclose(dump_file);
+                                dump_fileseq++;
+                                strncpy (dump_filename2, dump_filename, strlen (dump_filename) + 1);
+                                sprintf(dump_fileseqstr, "-%04d%02d%02d-%02d%02d.ts", (dump_nowtm->tm_year+1900), (dump_nowtm->tm_mon + 1), dump_nowtm->tm_mday, dump_nowtm->tm_hour, dump_nowtm->tm_min);
+                                strncat(dump_filename2, dump_fileseqstr , strlen (dump_filename) + 21);
 
+                                log_message( log_module, MSG_WARN,"Changing file: dumping the received stream into %s", dump_filename2);
+
+                                dump_file = fopen (dump_filename2, "w");
+                                if (dump_file == NULL)
+                                {
+                                    log_message( log_module,  MSG_ERROR, "%s: %s\n",
+                                            dump_filename2, strerror (errno));
+
+                                    free(dump_filename);
+                                    free(dump_filename2);
+                                }
+                                dump_nowsize = TS_PACKET_SIZE;
+                                gettimeofday(&dump_lastchunk, NULL);
+                            }
+                            if (fwrite(actual_ts_packet,sizeof(unsigned char),TS_PACKET_SIZE,dump_file)<TS_PACKET_SIZE)
+                                log_message( log_module,MSG_WARN,"Error while writing the dump : %s", strerror(errno));
+
+                            if (!(dump_nowsize % (TS_PACKET_SIZE * 5)))
+                                fflush(dump_file);
+                        }
 			// Test if the error bit is set in the TS packet received
 			if ((actual_ts_packet[1] & 0x80) == 0x80)
 			{
@@ -2047,7 +2105,7 @@ int mumudvb_close(int no_daemon,
 /******************************************************
  * Signal Handler Function
  *
- * This function is called periodically 
+ * This function is called periodically
  *  It checks for the tuning timeouts
  *
  * This function also catches SIGPIPE, SIGUSR1, SIGUSR2 and SIGHUP
@@ -2096,10 +2154,10 @@ void *monitor_func(void* arg)
 	gettimeofday (&tv, (struct timezone *) NULL);
 	monitor_start = tv.tv_sec + tv.tv_usec/1000000;
 	monitor_now = monitor_start;
-#ifdef ENABLE_SCAM_SUPPORT	
+#ifdef ENABLE_SCAM_SUPPORT
 	struct scam_parameters_t *scam_vars;
 	scam_vars=(struct scam_parameters_t *) params->scam_vars_v;
-#endif	
+#endif
 	while(!params->threadshutdown)
 	{
 		gettimeofday (&tv, (struct timezone *) NULL);
